@@ -4,6 +4,7 @@
 shader_type canvas_item;
 
 #define MAX_WAVES 24
+#define MAX_MUFFLERS 4
 
 uniform vec4 waves[MAX_WAVES];   // x, y (px мира), возраст (с), частота (Гц)
 uniform float amps[MAX_WAVES];   // амплитуда волны
@@ -11,6 +12,8 @@ uniform int wave_count = 0;
 uniform vec2 world_size = vec2(720.0, 1280.0);
 uniform float speed = 420.0;
 uniform float reflection = 0.45; // 0 — отражения выключены
+uniform vec4 mufflers[MAX_MUFFLERS]; // x, y, радиус (px), сила 0..1
+uniform int muffler_count = 0;
 
 vec3 freq_color(float f) {
 	// бас — янтарь, середина — бирюза, верх — фиолетово-белый лёд
@@ -57,6 +60,15 @@ void fragment() {
 	vec3 col = weight > 0.0001 ? tint / weight : vec3(0.0);
 	float light = pow(abs(field), 0.8) * 1.4;
 	vec3 c = col * light;
+	// Глушители пожирают свет и звук внутри себя.
+	for (int j = 0; j < MAX_MUFFLERS; j++) {
+		if (j >= muffler_count) {
+			break;
+		}
+		vec4 m = mufflers[j];
+		float inside = 1.0 - smoothstep(m.z * 0.8, m.z, distance(p, m.xy));
+		c *= 1.0 - 0.9 * inside * m.w;
+	}
 	c = c / (1.0 + c);             // мягкий тонмаппинг
 	c += vec3(0.004, 0.005, 0.009); // почти чёрный: OLED экономит батарею
 	COLOR = vec4(c, 1.0);

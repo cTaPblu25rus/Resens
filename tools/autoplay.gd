@@ -1,23 +1,24 @@
-## Автоигрок для проверки прототипа (локально и в CI).
-## Запуск: godot --path . -- --autoplay [--shots=папка]
-## Щиплет струны рядом с кристаллами До, Ми, Соль, снимает кадры и выходит
-## с кодом 0, если Сердце пробудилось, иначе с кодом 1.
+## Автоигрок: проходит ВСЕ уровни по эталонным решениям из levels/levels.json.
+## Запуск: godot --headless --path . -- --autoplay [--shots=папка] [--level=N]
+## Код выхода 0 — все уровни проходимы, 1 — какой-то уровень не пройден.
+##
+## Шаг решения:
+##   {"t": 0.6, "m": 60, "p": [x, y]}       — щипок ноты m с центром в p
+##   {"t": 0.5, "target": 0, "p": [x, y]}   — удар по Глушителю №0: автоигрок сам
+##       выбирает ноту, которую Глушитель будет иметь в момент прихода волны.
 extends Node
+
+const LEVEL_TIMEOUT := 14.0
+const SHOT_TIMES := [1.2, 2.6, 4.0]
 
 var main: Node
 var shots_dir := ""
+var only_level := -1
 var t := 0.0
 var step := 0
-
-# Время (с), нота, точка (норм. координаты) — центр струны.
-var plan := [
-	[0.6, 60, Vector2(0.30, 0.86)], # До4 у кристалла До4
-	[1.4, 64, Vector2(0.70, 0.82)], # Ми4 у кристалла Ми4
-	[2.2, 67, Vector2(0.50, 0.68)], # Соль4 у кристалла Соль4
-]
-var shots := [1.0, 1.9, 2.8, 3.6, 4.6]
 var shot_i := 0
-var done := false
+var failed: Array[String] = []
+var finishing := false
 
 
 func _ready() -> void:
@@ -25,34 +26,85 @@ func _ready() -> void:
 		if a.begins_with("--shots="):
 			shots_dir = a.trim_prefix("--shots=")
 			DirAccess.make_dir_recursive_absolute(shots_dir)
+		elif a.begins_with("--level="):
+			only_level = int(a.trim_prefix("--level="))
+	_start(only_level if only_level >= 0 else 0)
+
+
+func _start(i: int) -> void:
+	main.load_level(i)
+	t = 0.0
+	step = 0
+	shot_i = 0
+	finishing = false
 
 
 func _process(delta: float) -> void:
+	if finishing:
+		return
 	t += delta
-	if step < plan.size() and t >= plan[step][0]:
-		_pluck(plan[step][1], plan[step][2])
+	var sol: Array = main.level.get("solution", [])
+	if step < sol.size() and t >= float(sol[step].t):
+		_do(sol[step])
 		step += 1
-	if shots_dir != "" and shot_i < shots.size() and t >= shots[shot_i]:
-		var img := get_viewport().get_texture().get_image()
-		img.save_png("%s/shot_%d.png" % [shots_dir, shot_i])
+	if shots_dir != "" and shot_i < SHOT_TIMES.size() and t >= SHOT_TIMES[shot_i]:
+		_shot("L%d_%d" % [main.level_i + 1, shot_i])
 		shot_i += 1
-	if not done and (main.won or t > 9.0):
-		done = true
-		print("AUTOPLAY: won=%s plucks=%d t=%.1f" % [main.won, main.plucks, t])
-		if shots_dir != "" and main.won:
-			await get_tree().create_timer(0.6).timeout
-			get_viewport().get_texture().get_image().save_png("%s/shot_won.png" % shots_dir)
-		get_tree().quit(0 if main.won else 1)
+	if main.won or t > LEVEL_TIMEOUT:
+		finishing = true
+		_finish_level()
 
 
-## Струна нужной длины (обратная формула из main._current_midi).
-func _pluck(midi: int, center_n: Vector2) -> void:
-	var freq := 440.0 * pow(2.0, (midi - 69) / 12.0)
-	var length: float = 130.81 * main.world.y * 0.55 / freq
-	var c: Vector2 = center_n * main.world
-	var half := Vector2(length * 0.5, 0).rotated(-0.35)
-	main.drag_start = c - half
-	main.drag_end = c + half
+func _finish_level() -> void:
+	var name: String = main.level.name
+	print("AUTOPLAY: Тишь %d «%s»: won=%s щипков=%d t=%.1f" % [main.level_i + 1, name, main.won, main.plucks, t])
+	if not main.won:
+		failed.append(name)
+	if shots_dir != "" and main.won:
+		await get_tree().create_timer(0.6).timeout
+		_shot("L%d_won" % (main.level_i + 1))
+	var next: int = main.level_i + 1
+	if only_level < 0 and next < main.levels.size():
+		_start(next)
+		return
+	if failed.is_empty():
+		print("AUTOPLAY: все уровни пройдены")
+	else:
+		print("AUTOPLAY: НЕ пройдены: %s" % ", ".join(failed))
+	get_tree().quit(0 if failed.is_empty() else 1)
+
+
+func _shot(name: String) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	get_viewport().get_texture().get_image().save_png("%s/%s.png" % [shots_dir, name])
+
+
+func _do(s: Dictionary) -> void:
+	var center: Vector2 = main._v(s.p) * main.world
+	var midi: int
+	if s.has("target"):
+		var mf: Dictionary = main.mufflers[int(s.target)]
+		var arrival: float = main.now + center.distance_to(mf.pos) / main.WAVE_SPEED
+		midi = _nearest_playable(main.muffler_note(mf, arrival))
+	else:
+		midi = int(s.m)
+	_pluck(midi, center)
+
+
+## Нота Глушителя может быть вне лада уровня — берём её же в другой октаве, если надо.
+func _nearest_playable(m: int) -> int:
+	for cand in [m, m + 12, m - 12]:
+		if cand >= main.MIN_MIDI and cand <= main.MAX_MIDI and main.note_scale.has(cand % 12):
+			return cand
+	return m
+
+
+func _pluck(midi: int, center: Vector2) -> void:
+	var length: float = main.length_for_midi(midi)
+	var half := Vector2(length * 0.5, 0)
+	main.drag_start = center - half
+	main.drag_end = center + half
 	main.press_time = main.now - 0.8
 	var got: int = main._current_midi()
 	if got != midi:

@@ -15,7 +15,6 @@ boot_splash/show_image=false
 [audio]
 
 driver/mix_rate=44100
-general/default_playback_type.mobile=1
 
 [display]
 
